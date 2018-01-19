@@ -1,17 +1,14 @@
-import sys
-import z3
-import ctypes
+#import ctypes
+from decimal import Decimal
 import logging
 import numbers
 import operator
+import sys
 import threading
 import weakref
+from ..transition import raise_from
 from past.builtins import long
 from functools import reduce
-from decimal import Decimal
-
-from ..utils.transition import raise_from
-from ..errors import ClaripyZ3Error
 
 l = logging.getLogger("claripy.backends.backend_z3")
 
@@ -23,6 +20,51 @@ l = logging.getLogger("claripy.backends.backend_z3")
 
 # track the count of solves
 solve_count = 0
+
+#
+# Import and set up Z3
+#
+
+import os
+import z3
+
+if sys.platform == 'darwin':
+    z3_library_file = "libz3.dylib"
+elif sys.platform == 'win32':
+    z3_library_file = "libz3.dll"
+else:
+    z3_library_file = "libz3.so"
+
+from ..errors import ClaripyZ3Error
+
+_z3_paths = [ ]
+
+if "Z3PATH" in os.environ:
+    _z3_paths.append(os.environ["Z3PATH"])
+if "VIRTUAL_ENV" in os.environ:
+    virtual_env = os.environ["VIRTUAL_ENV"]
+    _z3_paths.append(os.path.join(os.environ["VIRTUAL_ENV"], "lib"))
+    _z3_paths.append(os.path.join(os.environ["VIRTUAL_ENV"], "site-packages/z3/lib"))
+
+_z3_paths.extend(sys.path)
+_z3_paths.append("/usr/lib")
+_z3_paths.append("/usr/local/lib")
+_z3_paths.append("/opt/python/lib")
+_z3_paths.append(os.path.join(sys.prefix, "lib"))
+
+#try:
+#    z3.z3core.lib()
+#except:
+#    for z3_path in _z3_paths:
+#        if not '.so' in z3_path and \
+        #                not '.dll' in z3_path and \
+        #        not '.dylib' in z3_path:
+        #    z3_path = os.path.join(z3_path, z3_library_file)
+        #if os.path.exists(z3_path):
+        #    z3.init(z3_path)
+        #    break
+#    else:
+#        raise ClaripyZ3Error("Unable to find %s" % z3_library_file)
 
 supports_fp = hasattr(z3, 'fpEQ')
 
@@ -100,15 +142,15 @@ class BackendZ3(Backend):
         self._op_raw['__and__'] = self._op_and
 
 
-    @property
-    def _c_uint64_p(self):
-        try:
-            return self._tls.c_uint64_p
-        except AttributeError:
+    #@property
+    #def _c_uint64_p(self):
+    #    try:
+    #        return self._tls.c_uint64_p
+    #    except AttributeError:
             # a pointer to get values out of Z3
-            self._tls.c_uint64_p = ctypes.pointer(ctypes.c_uint64())
+    #        self._tls.c_uint64_p = ctypes.pointer(ctypes.c_uint64())
 
-            return self._tls.c_uint64_p
+    #        return self._tls.c_uint64_p
 
     @property
     def _context(self):
@@ -287,9 +329,10 @@ class BackendZ3(Backend):
         """
 
         z3_hash = z3.Z3_get_ast_hash(ctx, ast)
-        z3_ast_ref = ast.value # this seems to be the memory address
-        z3_sort = z3.Z3_get_sort(ctx, ast).value
-        return "%d_%d_%d" % (z3_hash, z3_sort, z3_ast_ref)
+        z3_ast_ref = int(z3.ffi.cast('unsigned long', ast)) # this seems to be the memory address
+        z3_sort = z3.Z3_get_sort(ctx, ast)
+        z3_sort_ref = int(z3.ffi.cast('unsigned long',z3_sort))
+        return "%d_%d_%d" % (z3_hash, z3_sort_ref, z3_ast_ref)
 
     def _abstract_internal(self, ctx, ast, split_on=None):
         h = self._z3_ast_hash(ctx, ast)
@@ -323,8 +366,9 @@ class BackendZ3(Backend):
             return RM.from_name(op_name)
         elif op_name == 'BitVecVal':
             bv_size = z3.Z3_get_bv_sort_size(ctx, z3_sort)
-            if z3.Z3_get_numeral_uint64(ctx, ast, self._c_uint64_p):
-                return BVV(self._c_uint64_p.contents.value, bv_size)
+            temp = z3.ffi.new('uint64_t[1]')
+            if z3.Z3_get_numeral_uint64(ctx, ast, temp):
+                return BVV(temp[0], bv_size)
             else:
                 bv_num = int(z3.Z3_get_numeral_string(ctx, ast))
                 return BVV(bv_num, bv_size)
@@ -443,8 +487,9 @@ class BackendZ3(Backend):
         op_name = op_map[z3_op_nums[decl_num]]
 
         if op_name == 'BitVecVal':
-            if z3.Z3_get_numeral_uint64(ctx, ast, self._c_uint64_p):
-                return self._c_uint64_p.contents.value
+            temp = z3.ffi.new('uint64_t[1]')
+            if z3.Z3_get_numeral_uint64(ctx, ast, temp):
+                return temp[0]
             else:
                 bv_num = int(z3.Z3_get_numeral_string(ctx, ast))
                 return bv_num
@@ -462,9 +507,9 @@ class BackendZ3(Backend):
             # TODO: do better than this
             fp_mantissa = float(z3.Z3_fpa_get_numeral_significand_string(ctx, ast))
             fp_exp = int(z3.Z3_fpa_get_numeral_exponent_string(ctx, ast, False))
-            fp_sign_c = ctypes.c_int()
-            z3.Z3_fpa_get_numeral_sign(ctx, ast, ctypes.byref(fp_sign_c))
-            fp_sign = -1 if fp_sign_c.value != 0 else 1
+            fp_sign_c = z3.ffi.new('int[1]')
+            z3.Z3_fpa_get_numeral_sign(ctx, ast, fp_sign_c)
+            fp_sign = -1 if fp_sign_c[0] != 0 else 1
             value = fp_sign * fp_mantissa * (2 ** fp_exp)
             return value
         elif op_name == 'MinusZero':
