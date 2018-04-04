@@ -156,9 +156,20 @@ def concat_simplifier(*args):
             current = args[i]
 
             if not (previous.symbolic or current.symbolic) and backends.concrete.handles(previous) and backends.concrete.handles(current):
-                args[i-1:i+1] = (ast.all_operations.Concat(previous, current),)
-            else:
-                i += 1
+                concatted = ast.all_operations.Concat(previous, current)
+                # If the concrete arguments to concat have non-relocatable annotations attached,
+                # we may not be able to simplify the concrete concat. This check makes sure we don't
+                # create a nested concat in that case.
+                #
+                # This is necessary to ensure that simplified is set correctly. If we don't check this here,
+                # later the concat-of-concat will eliminate the newly introduced concat again, meaning we end
+                # up with the same args that we started with. But because we only eliminate the concat later,
+                # the simplified variable would still be set to True after this loop which is wrong.
+                if concatted.op != "Concat":
+                    args[i-1:i+1] = (concatted,)
+                    continue
+
+            i += 1
 
         if len(args) < len(orig_args):
             simplified = True
@@ -379,7 +390,7 @@ def boolean_or_simplifier(*args):
 
     return _flatten_simplifier('Or', _flattening_filter, *args)
 
-def _flatten_simplifier(op_name, filter_func, *args):
+def _flatten_simplifier(op_name, filter_func, *args, **kwargs):
     if not any(isinstance(a, ast.Base) and a.op == op_name for a in args):
         return
 
@@ -391,6 +402,8 @@ def _flatten_simplifier(op_name, filter_func, *args):
         (a.args if isinstance(a, ast.Base) and a.op == op_name else (a,)) for a in args
     ))
     if filter_func: new_args = filter_func(new_args)
+    if not new_args and kwargs.has_key('initial_value'):
+        return kwargs['initial_value']
     return next(a for a in args if isinstance(a, ast.Base)).make_like(op_name, new_args)
 
 def bitwise_add_simplifier(a, b):
@@ -425,7 +438,7 @@ def bitwise_xor_simplifier(a, b):
         unique_args = set(k for k in ctr if ctr[k] % 2 != 0)
         return tuple([ arg for arg in args if arg in unique_args ])
 
-    return _flatten_simplifier('__xor__', _flattening_filter, a, b)
+    return _flatten_simplifier('__xor__', _flattening_filter, a, b, initial_value=ast.all_operations.BVV(0, a.size()))
 
 def bitwise_or_simplifier(a, b):
     if a is ast.all_operations.BVV(0, a.size()):
